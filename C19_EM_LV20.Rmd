@@ -2,7 +2,7 @@
 title: "Covid-19 excess mortality in Latvia 2020"
 author: "AAvj"
 date: ''
-output: html_document
+output: rmdformats::html_clean
 ---
 
 ```{r setup, include=FALSE}
@@ -289,7 +289,7 @@ macibam <- dati %>%
 The best model will be fitted to all dataset
 
 
-## All cause mortality
+# All cause mortality
 
 Fitting models
 
@@ -453,7 +453,7 @@ attels_total_weeks
 ```
 
 
-## I00_I99 - circular diseases
+# I00_I99 - circular diseases
 
 Circular disease models
 
