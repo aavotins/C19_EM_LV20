@@ -1,0 +1,1140 @@
+---
+title: "Covid-19 excess mortality in Latvia 2020"
+author: "AAvj"
+date: ''
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+Importation of necessary libraries.
+
+If any is not installed it can be done with install.packages("name",dependencies=TRUE). Package name must be in quotes.
+
+```{r libs,message=FALSE,warning=FALSE}
+suppressPackageStartupMessages(library(here))
+suppressPackageStartupMessages(library(tidyverse)) # data processing
+suppressPackageStartupMessages(library(mgcv)) # GAMs
+suppressPackageStartupMessages(library(MuMIn)) # AICc
+suppressPackageStartupMessages(library(haven)) # SPSS file import
+suppressPackageStartupMessages(library(readxl)) # Excel file import
+suppressPackageStartupMessages(library(car)) # model evaluation
+suppressPackageStartupMessages(library(lubridate)) # dealing with dates
+suppressPackageStartupMessages(library(patchwork)) # vizualisations
+```
+
+## Data
+
+### Mortality data
+
+Data are already partially processed in software SPSS, preparing death cause classes for analysis
+
+Addition of the week of the year is necessary.
+
+```{r mirusie}
+mirusie <- read_sav("../dati/mirusie_2015_2020_newclasses.sav") # importing file from a location on my computer
+
+mirusie$WOY=week(mirusie$mirsanas_datums) # adding the week of the year
+```
+
+Data contain casewise information - one line is one case
+
+For ease of work, one variable with grouped causes is created
+
+```{r}
+mirusie$diagnozes=ifelse(mirusie$C00_C97==1,"Malignant_neoplasms",
+                         ifelse(mirusie$E10_E14==1,"Diabetes_mellitus",
+                                ifelse(mirusie$U07==1,"Covid_caused",
+                                       ifelse(mirusie$J40_J47==1,"CLRd",
+                                              ifelse(mirusie$V01_V99==1,"Traffic",
+                                                     ifelse(mirusie$Circulatory_diseases==1,"Circulatory","Other"))))))
+```
+
+
+To run analysis count of cases per diagnosis in every week must be calculated. If there are no deaths, value 0 is imputed.
+
+
+```{r diagnozem}
+diagnozes <- mirusie %>% # table diagnozes is created
+  group_by(gads,WOY,diagnozes) %>% # calculus seperately for every diagnosis of every week in every year
+  summarise(skaits=n()) %>% # calculus for the number of cases
+  ungroup() %>% # data table is ungrouoped into single virtual file
+  pivot_wider(names_from = diagnozes,values_from = skaits, values_fill = 0) %>% # that is spread for every diagnosis group 
+  # showing number of cases per week of every year
+  group_by(gads,WOY) %>% # again grouped for week in year
+  mutate(kopa=Circulatory+CLRd+Diabetes_mellitus+Malignant_neoplasms+Other+Traffic+Covid_caused) %>% # to calculate total number of cases
+  ungroup() # and ungrouped into single virtual file
+
+
+```
+
+
+Additionally, table with the number of cases with Covid-19 as additional cause of death is created, following previous procedure
+
+```{r}
+diag_papild <- mirusie %>% 
+  mutate(papildus=ifelse(Covid_papildcēloņos=="Jā",1,0)) %>% 
+  group_by(gads,WOY,diagnozes) %>% 
+  summarise(skaits=sum(papildus,na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = diagnozes,values_from = skaits, values_fill = 0) %>% 
+  group_by(gads,WOY) %>% 
+  mutate(Covid_attributed=Circulatory+CLRd+Diabetes_mellitus+Malignant_neoplasms+Other+Traffic) %>% 
+  ungroup()
+```
+
+Preparation of data table with all the information of Covid-19 and deaths and arrange database by year and week of the year
+
+```{r}
+diag_papild <- diag_papild %>% select(gads,WOY,Covid_attributed) # select info on the number of Covid-attributed deaths
+
+diagnozes <- merge(diagnozes,diag_papild,by=c("gads","WOY")) # combine both diagnosis data frames in one
+
+diagnozes <- diagnozes %>% 
+  mutate(Covid_related = Covid_caused + Covid_attributed) %>% 
+  arrange(gads,WOY)
+```
+
+
+### Population 
+
+Weekly populations are calculated separately and available as Excel file. This file contains unnecessary information at the end of it, therefore during import, only first 54 rows are read.
+
+```{r}
+populacija <- read_excel("../dati/populacija.xlsx",n_max = 54) # location on my computer
+str(populacija)
+```
+
+
+Population is calculated in thousands and contains information per week in rows at year in columns. This must be converted to long format with individual row per week in year.
+
+```{r}
+populacija2 <- populacija %>% 
+  pivot_longer(cols=2:7,names_to="gads",values_to="pop")
+```
+
+Then population is converted to individuals and year to number from a character
+
+```{r}
+populacija2$pop=populacija2$pop*1000
+populacija2$gads=as.numeric(populacija2$gads)
+```
+
+
+An unnecessary original file is removed from memory
+
+```{r}
+rm(populacija)
+```
+
+### Merging data
+
+For analysis we need to merge these files containing population and the number of cases
+
+```{r}
+dati=merge(diagnozes,populacija2,by.x=c("gads","WOY"),by.y=c("gads","nedela"))
+```
+
+
+Arrange database by year and week of the year
+
+```{r}
+dati <- dati %>% 
+  arrange(gads,WOY)
+```
+
+
+We only need first 52 weeks of every year
+
+```{r}
+dati <- dati %>% filter(WOY<=52)
+```
+
+and it is better to have year as factor
+
+```{r}
+dati$fgads=as.factor(dati$gads)
+```
+
+
+# Models 
+
+Response - number of death cases
+
+As population has changed, need to account for its size - *offset(log(pop))*
+
+We care about weekly mortality and it`s change between years. It can be done with main effects model with regressors as follows:
+
+- year as factor;
+
+- week as numeric.
+
+As there are 52 weeks, we are going to use 52 basis functions, that can be compared from fixed to model selected number.
+
+We are going to compare between following basis functions:
+
+- thin plate splines;
+
+- cubic regression;
+
+- cyclic cubic.
+
+Models will be compared with AICc. The lower the AICc, the better is the generalization provided by the model. 
+
+All models will be fitted with Poisson family and log link function.
+
+# Baseline length
+
+We performed evaluated four reasonable baseline lengths for model training:
+
+- First registered COVID-19 case in 2020-03-02 - sixth day of week nine -, thus including counts from the first week in 2015 until the ninth week of 2020 in  the baseline;
+
+- Emergency situation was declared from 2020-03-12 - second day of week 12 -, thus including counts from the first week in 2015 until the 11th week of 2020 in the baseline;
+
+- Accessability of medical procedures was limited in 2020-03-27 - third day of week 13 -, thus including counts from the first week in 2015 until 12th week of 2020 in the baseline;
+
+- First known death case from COVID-19 was reported in 2020-04-03 - third day of week 14 -, thus including counts from the first week in 2015 until 13th week of 2020 in the baseline.
+
+We carried out baseline length evaluation only for All-cause mortality, comparing the effects of the year in above mentioned basis function and knot combinations.
+
+Models and their speciffic data:
+
+```{r}
+bl1_data=dati %>% filter(!(gads==2020&WOY>=10))
+bl1_tp_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),data=bl1_data,family=poisson(link="log"),method="REML")
+bl1_tp_s=gam(kopa ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),data=bl1_data,family=poisson(link="log"),method="REML")
+bl1_cr_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),data=bl1_data,family=poisson(link="log"),method="REML")
+bl1_cr_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cr")+offset(log(pop)),data=bl1_data,family=poisson(link="log"),method="REML")
+bl1_cc_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),data=bl1_data,family=poisson(link="log"),method="REML")
+bl1_cc_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),data=bl1_data,family=poisson(link="log"),method="REML")
+
+bl2_data=dati %>% filter(!(gads==2020&WOY>=12))
+bl2_tp_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),data=bl2_data,family=poisson(link="log"),method="REML")
+bl2_tp_s=gam(kopa ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),data=bl2_data,family=poisson(link="log"),method="REML")
+bl2_cr_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),data=bl2_data,family=poisson(link="log"),method="REML")
+bl2_cr_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cr")+offset(log(pop)),data=bl2_data,family=poisson(link="log"),method="REML")
+bl2_cc_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),data=bl2_data,family=poisson(link="log"),method="REML")
+bl2_cc_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),data=bl2_data,family=poisson(link="log"),method="REML")
+
+bl3_data=dati %>% filter(!(gads==2020&WOY>=13))
+bl3_tp_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),data=bl3_data,family=poisson(link="log"),method="REML")
+bl3_tp_s=gam(kopa ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),data=bl3_data,family=poisson(link="log"),method="REML")
+bl3_cr_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),data=bl3_data,family=poisson(link="log"),method="REML")
+bl3_cr_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cr")+offset(log(pop)),data=bl3_data,family=poisson(link="log"),method="REML")
+bl3_cc_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),data=bl3_data,family=poisson(link="log"),method="REML")
+bl3_cc_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),data=bl3_data,family=poisson(link="log"),method="REML")
+
+bl4_data=dati %>% filter(!(gads==2020&WOY>=14))
+bl4_tp_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),data=bl4_data,family=poisson(link="log"),method="REML")
+bl4_tp_s=gam(kopa ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),data=bl4_data,family=poisson(link="log"),method="REML")
+bl4_cr_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),data=bl4_data,family=poisson(link="log"),method="REML")
+bl4_cr_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cr")+offset(log(pop)),data=bl4_data,family=poisson(link="log"),method="REML")
+bl4_cc_f=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),data=bl4_data,family=poisson(link="log"),method="REML")
+bl4_cc_s=gam(kopa ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),data=bl4_data,family=poisson(link="log"),method="REML")
+
+```
+
+Baseline lengths were compared for the effect in 2020 (relative risk compared to reference in 2015).
+
+```{r}
+modeli=c("bl1_tp_f","bl1_tp_s","bl1_cr_f","bl1_cr_s","bl1_cc_f","bl1_cc_s",
+         "bl2_tp_f","bl2_tp_s","bl2_cr_f","bl2_cr_s","bl2_cc_f","bl2_cc_s",
+         "bl3_tp_f","bl3_tp_s","bl3_cr_f","bl3_cr_s","bl3_cc_f","bl3_cc_s",
+         "bl4_tp_f","bl4_tp_s","bl4_cr_f","bl4_cr_s","bl4_cc_f","bl4_cc_s")
+
+
+funkcijai=function(mod){
+  list(
+  exp(summary(mod)$p.coeff[6]),
+  exp(summary(mod)$p.coeff[6]-1.96*summary(mod)$se[6]),
+  exp(summary(mod)$p.coeff[6]+1.96*summary(mod)$se[6])
+  )
+}
+
+salidzinat=data.frame(modelis=modeli,
+                      RR=rep(NA,length(modeli)),minRR=rep(NA,length(modeli)),maxRR=rep(NA,length(modeli)))
+
+for (i in seq_along(modeli)){
+  salidzinat[i,2]=funkcijai(get(modeli[i]))[1]
+  salidzinat[i,3]=funkcijai(get(modeli[i]))[2]
+  salidzinat[i,4]=funkcijai(get(modeli[i]))[3]
+}
+
+
+ggplot(salidzinat,aes(modelis,RR,ymin=minRR,ymax=maxRR))+theme_classic()+
+  geom_point()+
+  geom_pointrange()+
+  coord_cartesian(ylim=c(0.85,1.0))+
+  ylab("Relative risk in 2020")+
+  xlab("Model")+
+  theme(axis.text.x = element_text(angle=90))
+```
+
+All models provide considerably the same effect of 2020. Therefore, the best explainable baseline is to be used further on in an analysis. As our goal is to investigate effect on mortality we choose to use fourth baseline version - until the first confirmed death case.
+
+# Training period
+
+Model will be trained with data from the first week of 2015 until 13th (including) week of 2020.
+
+
+```{r}
+macibam <- dati %>% 
+  filter(!(gads==2020&WOY>=14))
+```
+
+The best model will be fitted to all dataset
+
+
+## All cause mortality
+
+Fitting models
+
+```{r}
+total_tp_c=gam(kopa ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+total_tp_fx=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+total_cr_c=gam(kopa ~ fgads + s(WOY,k=51,bs="cr")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+total_cr_fx=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+total_cc_c=gam(kopa ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+total_cc_fx=gam(kopa ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+```
+
+Comparing fitted models. The best model is total_tp_c - thin plate splines with non-fixed effect of the week
+
+```{r}
+AICc(total_tp_c,total_tp_fx,total_cr_c,total_cr_fx,total_cc_c,total_cc_fx)
+```
+
+
+Model summary
+
+```{r}
+summary(total_tp_c)
+```
+
+Relative risks for years
+
+```{r}
+apk_total_tp_c=summary(total_tp_c)
+RR_total=round(exp(apk_total_tp_c$p.coeff),3)
+RRmin_total=round(exp(apk_total_tp_c$p.coeff-1.96*apk_total_tp_c$se[1:6]),3)
+RRmax_total=round(exp(apk_total_tp_c$p.coeff+1.96*apk_total_tp_c$se[1:6]),3)
+rbind(RR_total,RRmin_total,RRmax_total)
+```
+
+### Confidence intervals
+
+Prediction of the numbers of cases with 95% confidence intervals.
+
+```{r,fig.width=9,fig.height=4.5}
+pred_total_tp_c=as.data.frame(predict(total_tp_c,newdata = dati,se=TRUE,type="response")) # prediction with standart error
+pred_total_tp_c$min_total_tp_c=pred_total_tp_c$fit-1.96*pred_total_tp_c$se.fit # lower boundary is 1.96 standart errors below the mean
+pred_total_tp_c$max_total_tp_c=pred_total_tp_c$fit+1.96*pred_total_tp_c$se.fit # lower boundary is 1.96 standart errors above the mean
+colnames(pred_total_tp_c)[1]="fit_total_tp_c" # renaming columns
+pred_total_tp_c=pred_total_tp_c[,c(1,3,4)] # selecting necessary columns
+
+totalie=cbind(dati,pred_total_tp_c) # combining prediction with data
+```
+
+
+### Prediction intervals
+
+Prediction intervals cannot be obtained with function predict as in lm. They have to be simulated from the posterior.
+
+```{r prediction total_tp_c}
+
+# extract the parameter estimates and their covariance matrix
+beta=coef(total_tp_c)
+V=vcov(total_tp_c)
+
+# Simulate number of parameter vectors by Cholesky factorisation of the covariance matrix
+num_beta_vecs <- 10000
+Cv <- chol(V)
+set.seed(1)
+nus <- rnorm(num_beta_vecs * length(beta))
+beta_sims <- beta + t(Cv) %*% matrix(nus, nrow = length(beta), ncol = num_beta_vecs)
+
+
+# use data for predictions 
+sim_dat2=dati
+
+# calculate linear predictors
+covar_sim <- predict(total_tp_c, newdata = sim_dat2, type = "lpmatrix")
+linpred_sim <- covar_sim %*% beta_sims
+
+# inverse link function
+exp_val_sim <- exp(linpred_sim)
+
+# matrix for predictions
+exp_val_sim2 <- matrix(NA,nrow=nrow(exp_val_sim),ncol=ncol(exp_val_sim))
+
+# as offset was used, need to account for population size
+for (i in 1:ncol(exp_val_sim)){
+  for (j in 1:nrow(exp_val_sim)){
+    exp_val_sim2[j,i]=exp_val_sim[j,i]*dati$pop[j]
+  }
+}
+
+# posterior draws from Poisson family
+y_sim <- matrix(rpois(n = prod(dim(exp_val_sim2)), 
+                      lambda = exp_val_sim2), 
+                nrow = nrow(exp_val_sim2), 
+                ncol = ncol(exp_val_sim2))
+
+# reduction to prediction interval
+pred_int_sim <- apply(y_sim, 1, quantile, prob = c(.025, 0.975))
+
+# transpose matrix
+predint_total_tp_c=t(pred_int_sim)
+
+# combine with data and confidence intervals
+kopejais_total_tp_c=cbind(dati,pred_total_tp_c,predint_total_tp_c)
+```
+
+### Results
+
+Preparation of table with observed, model predicted, difference and excess values
+
+```{r}
+# Extract values from 2020
+total_2020=kopejais_total_tp_c %>% 
+  filter(fgads==2020)
+
+# pick necessary columns
+total_2020_csv=total_2020[,c("gads","WOY","pop","Covid_caused","Covid_attributed","Covid_related","kopa","fit_total_tp_c","2.5%","97.5%")]
+
+# create table 
+total_2020_csv=total_2020_csv %>% 
+  mutate(AllCause_observed=kopa,
+         AllCause_fitted=round(fit_total_tp_c,0),
+         AllCause_PImin=round(`2.5%`,0),
+         AllCause_PImax=round(`97.5%`,0)) %>% 
+  group_by(WOY,pop,Covid_caused,Covid_attributed,Covid_related,AllCause_observed,AllCause_fitted,AllCause_PImin,AllCause_PImax) %>% 
+  summarize(AllCause_diff=round(AllCause_observed-fit_total_tp_c,0),
+            AllCause_diff_min=round(AllCause_observed-AllCause_PImax,0),
+            AllCause_diff_max=round(AllCause_observed-AllCause_PImin,0),
+            AllCause_excess=ifelse(round(AllCause_observed-fit_total_tp_c,0)>0,
+                                   round(AllCause_observed-fit_total_tp_c,0),0),
+            AllCause_excess_max=ifelse(round(AllCause_observed-AllCause_PImin,0)>0,
+                                       round(AllCause_observed-AllCause_PImin,0),0),
+            AllCause_excess_min=ifelse(round(AllCause_observed-AllCause_PImax,0)>0,
+                                       round(AllCause_observed-AllCause_PImax,0),0)) %>%
+  ungroup()
+
+write_excel_csv2(total_2020_csv,"./outputs/table_AllCause.csv") # write resulting table to file
+```
+
+### Figures
+
+Observed and model predicted values in 2020
+
+```{r,fig.width=9,fig.height=3}
+
+attels_total_weeks <- ggplot(total_2020,aes(x=WOY,y=kopa))+
+  geom_vline(xintercept=13,lty=3)+
+  theme_classic()+
+  geom_point()+
+  geom_ribbon(data=total_2020,aes(x=WOY,ymin=`2.5%`,ymax=`97.5%`),alpha=.3)+
+  geom_ribbon(data=total_2020,aes(x=WOY,ymin=min_total_tp_c,ymax=max_total_tp_c),alpha=.5)+
+  geom_line(data=total_2020,aes(x=WOY,y=fit_total_tp_c))+
+  xlab("Week of the year 2020")+
+  ylab("Count")+
+  ggtitle("All-cause")
+attels_total_weeks
+```
+
+
+## I00_I99 - circular diseases
+
+Circular disease models
+
+```{r}
+I00I99_tp_c=gam(Circulatory ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+I00I99_tp_fx=gam(Circulatory ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+I00I99_cr_c=gam(Circulatory ~ fgads + s(WOY,k=51,bs="cr")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+I00I99_cr_fx=gam(Circulatory ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+I00I99_cc_c=gam(Circulatory ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+I00I99_cc_fx=gam(Circulatory ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+```
+
+Model selection. The best model is I00I99_tp_c - thin plate splines with non-fixed effect of the week
+
+```{r}
+
+AICc(I00I99_tp_c,I00I99_tp_fx,I00I99_cr_c,I00I99_cr_fx,I00I99_cc_c,I00I99_cc_fx)
+```
+
+
+Model summary
+
+```{r}
+summary(I00I99_tp_c)
+```
+
+
+Relative risks
+
+```{r}
+apk_I00I99_tp_c=summary(I00I99_tp_c)
+RR_I00I99=round(exp(apk_I00I99_tp_c$p.coeff),3)
+RRmin_I00I99=round(exp(apk_I00I99_tp_c$p.coeff-1.96*apk_I00I99_tp_c$se[1:6]),3)
+RRmax_I00I99=round(exp(apk_I00I99_tp_c$p.coeff+1.96*apk_I00I99_tp_c$se[1:6]),3)
+rbind(RR_I00I99,RRmin_I00I99,RRmax_I00I99)
+```
+
+### Confidence intervals
+
+Prediction of the numbers of cases with 95% confidence intervals.
+
+```{r,fig.width=9,fig.height=4.5}
+pred_I00I99_tp_c=as.data.frame(predict(I00I99_tp_c,newdata = dati,se=TRUE,type="response"))
+pred_I00I99_tp_c$min_I00I99_tp_c=pred_I00I99_tp_c$fit-1.96*pred_I00I99_tp_c$se.fit
+pred_I00I99_tp_c$max_I00I99_tp_c=pred_I00I99_tp_c$fit+1.96*pred_I00I99_tp_c$se.fit
+colnames(pred_I00I99_tp_c)[1]="fit_I00I99_tp_c"
+pred_I00I99_tp_c=pred_I00I99_tp_c[,c(1,3,4)]
+
+I00I99ie=cbind(dati,pred_I00I99_tp_c)
+```
+
+
+
+### Prediction intervals
+
+Prediction intervals cannot be obtained with function predict as in lm. They have to be simulated from the posterior.
+
+```{r prediction I00I99_tp_c}
+# extract the parameter estimates and their covariance matrix
+beta=coef(I00I99_tp_c)
+V=vcov(I00I99_tp_c)
+
+# Simulate number of parameter vectors by Cholesky factorisation of the covariance matrix
+num_beta_vecs <- 10000
+Cv <- chol(V)
+set.seed(1)
+nus <- rnorm(num_beta_vecs * length(beta))
+beta_sims <- beta + t(Cv) %*% matrix(nus, nrow = length(beta), ncol = num_beta_vecs)
+
+# use data for predictions 
+sim_dat2=dati
+
+
+# calculate linear predictors
+covar_sim <- predict(I00I99_tp_c, newdata = sim_dat2, type = "lpmatrix")
+linpred_sim <- covar_sim %*% beta_sims
+
+
+# inverse link function
+exp_val_sim <- exp(linpred_sim)
+
+
+# matrix for predictions
+exp_val_sim2 <- matrix(NA,nrow=nrow(exp_val_sim),ncol=ncol(exp_val_sim))
+
+
+# as offset was used, need to account for population size
+for (i in 1:ncol(exp_val_sim)){
+  for (j in 1:nrow(exp_val_sim)){
+    exp_val_sim2[j,i]=exp_val_sim[j,i]*dati$pop[j]
+  }
+}
+
+
+# posterior draws from Poisson family
+y_sim <- matrix(rpois(n = prod(dim(exp_val_sim2)), 
+                      lambda = exp_val_sim2), 
+                nrow = nrow(exp_val_sim2), 
+                ncol = ncol(exp_val_sim2))
+
+
+# reduction to prediction interval
+pred_int_sim <- apply(y_sim, 1, quantile, prob = c(.025, 0.975))
+
+
+# transpose matrix
+predint_I00I99_tp_c=t(pred_int_sim)
+
+
+# combine with data and confidence intervals
+kopejais_I00I99_tp_c=cbind(dati,pred_I00I99_tp_c,predint_I00I99_tp_c)
+```
+
+
+
+### Results
+
+Preparation of table with observed, model predicted, difference and excess values
+
+```{r}
+
+# Extract values from 2020
+I00I99_2020=kopejais_I00I99_tp_c %>% 
+  filter(fgads==2020)
+
+
+# pick necessary columns
+I00I99_2020_csv=I00I99_2020[,c("gads","WOY","pop","Circulatory","fit_I00I99_tp_c","2.5%","97.5%")]
+
+# create table 
+I00I99_2020_csv=I00I99_2020_csv %>%
+  mutate(Circulatory_observed=Circulatory,
+         Circulatory_fitted=round(fit_I00I99_tp_c,0),
+         Circulatory_PImin=round(`2.5%`,0),
+         Circulatory_PImax=round(`97.5%`,0)) %>% 
+  group_by(WOY,Circulatory_observed,Circulatory_fitted,Circulatory_PImin,Circulatory_PImax) %>% 
+  summarize(Circulatory_diff=round(Circulatory_observed-Circulatory_fitted,0),
+            Circulatory_diff_PImin=round(Circulatory_observed-Circulatory_PImax,0),
+            Circulatory_diff_PImax=round(Circulatory_observed-Circulatory_PImin,0),
+            Circulatory_excess=ifelse(round(Circulatory_observed-Circulatory_fitted,0)>0,
+                                      round(Circulatory_observed-Circulatory_fitted,0),0),
+            Circulatory_excess_PImin=ifelse(round(Circulatory_observed-Circulatory_PImax,0)>0,
+                                            round(Circulatory_observed-Circulatory_PImax,0),0),
+            Circulatory_excess_PImax=ifelse(round(Circulatory_observed-Circulatory_PImin,0)>0,
+                                            round(Circulatory_observed-Circulatory_PImin,0),0)) %>% 
+ungroup()
+
+write_excel_csv2(I00I99_2020_csv,"./outputs/table_Circulatory.csv") # write resulting table to file
+```
+
+### Figures
+
+Observed and model predicted values in 2020
+
+```{r,fig.width=9,fig.height=3}
+
+attels_I00I99_weeks <- ggplot(I00I99_2020,aes(x=WOY,y=Circulatory))+
+  geom_vline(xintercept=13,lty=3)+
+  theme_classic()+
+  geom_point()+
+  geom_ribbon(data=I00I99_2020,aes(x=WOY,ymin=`2.5%`,ymax=`97.5%`),alpha=.3)+
+  geom_ribbon(data=I00I99_2020,aes(x=WOY,ymin=min_I00I99_tp_c,ymax=max_I00I99_tp_c),alpha=.5)+
+  geom_line(data=I00I99_2020,aes(x=WOY,y=fit_I00I99_tp_c))+
+  xlab("Week of the year 2020")+
+  ylab("Count")+
+  ggtitle("Circular diseases")
+attels_I00I99_weeks
+```
+
+
+# C00_C97 - oncology
+
+
+Fitting models
+
+```{r}
+C00C97_tp_c=gam(Malignant_neoplasms ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+C00C97_tp_fx=gam(Malignant_neoplasms ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+C00C97_cr_c=gam(Malignant_neoplasms ~ fgads + s(WOY,k=51,bs="cr")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+C00C97_cr_fx=gam(Malignant_neoplasms ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+C00C97_cc_c=gam(Malignant_neoplasms ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+C00C97_cc_fx=gam(Malignant_neoplasms ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+```
+
+
+Comparing fitted models. The best model is C00C97_cc_c - cyclic cubic splines with non-fixed effect of the week
+
+```{r}
+
+AICc(C00C97_tp_c,C00C97_tp_fx,C00C97_cr_c,C00C97_cr_fx,C00C97_cc_c,C00C97_cc_fx)
+```
+
+
+Model summary
+
+```{r}
+summary(C00C97_cc_c)
+```
+
+Relative risks for years
+
+```{r}
+apk_C00C97_cc_c=summary(C00C97_cc_c)
+RR_C00C97=round(exp(apk_C00C97_cc_c$p.coeff),3)
+RRmin_C00C97=round(exp(apk_C00C97_cc_c$p.coeff-1.96*apk_C00C97_cc_c$se[1:6]),3)
+RRmax_C00C97=round(exp(apk_C00C97_cc_c$p.coeff+1.96*apk_C00C97_cc_c$se[1:6]),3)
+rbind(RR_C00C97,RRmin_C00C97,RRmax_C00C97)
+```
+
+
+### Confidence intervals
+
+Prediction of the numbers of cases with 95% confidence intervals.
+
+
+```{r,fig.width=9,fig.height=4.5}
+pred_C00C97_cc_c=as.data.frame(predict(C00C97_cc_c,newdata = dati,se=TRUE,type="response"))
+pred_C00C97_cc_c$min_C00C97_cc_c=pred_C00C97_cc_c$fit-1.96*pred_C00C97_cc_c$se.fit
+pred_C00C97_cc_c$max_C00C97_cc_c=pred_C00C97_cc_c$fit+1.96*pred_C00C97_cc_c$se.fit
+colnames(pred_C00C97_cc_c)[1]="fit_C00C97_cc_c"
+pred_C00C97_cc_c=pred_C00C97_cc_c[,c(1,3,4)]
+
+C00C97ie=cbind(dati,pred_C00C97_cc_c)
+```
+
+
+### Prediction intervals
+
+Prediction intervals cannot be obtained with function predict as in lm. They have to be simulated from the posterior.
+
+
+```{r prediction C00C97_cc_c}
+
+# extract the parameter estimates and their covariance matrix
+beta=coef(C00C97_cc_c)
+V=vcov(C00C97_cc_c)
+
+# Simulate number of parameter vectors by Cholesky factorisation of the covariance matrix
+num_beta_vecs <- 10000
+Cv <- chol(V)
+set.seed(1)
+nus <- rnorm(num_beta_vecs * length(beta))
+beta_sims <- beta + t(Cv) %*% matrix(nus, nrow = length(beta), ncol = num_beta_vecs)
+
+# use data for predictions 
+sim_dat2=dati
+
+# calculate linear predictors
+covar_sim <- predict(C00C97_cc_c, newdata = sim_dat2, type = "lpmatrix")
+linpred_sim <- covar_sim %*% beta_sims
+
+# inverse link function
+exp_val_sim <- exp(linpred_sim)
+
+# matrix for predictions
+exp_val_sim2 <- matrix(NA,nrow=nrow(exp_val_sim),ncol=ncol(exp_val_sim))
+
+# as offset was used, need to account for population size
+for (i in 1:ncol(exp_val_sim)){
+  for (j in 1:nrow(exp_val_sim)){
+    exp_val_sim2[j,i]=exp_val_sim[j,i]*dati$pop[j]
+  }
+}
+
+
+# posterior draws from Poisson family
+y_sim <- matrix(rpois(n = prod(dim(exp_val_sim2)), 
+                      lambda = exp_val_sim2), 
+                nrow = nrow(exp_val_sim2), 
+                ncol = ncol(exp_val_sim2))
+
+# reduction to prediction interval
+pred_int_sim <- apply(y_sim, 1, quantile, prob = c(.025, 0.975))
+
+# transpose matrix
+predint_C00C97_cc_c=t(pred_int_sim)
+
+
+# combine with data and confidence intervals
+kopejais_C00C97_cc_c=cbind(dati,pred_C00C97_cc_c,predint_C00C97_cc_c)
+```
+
+### Results
+
+Preparation of table with observed, model predicted, difference and excess values
+
+```{r}
+# Extract values from 2020
+C00C97_2020=kopejais_C00C97_cc_c %>% 
+  filter(fgads==2020)
+
+# pick necessary columns
+C00C97_2020_csv=C00C97_2020[,c("gads","WOY","Malignant_neoplasms","fit_C00C97_cc_c","2.5%","97.5%")]
+
+# create table 
+C00C97_2020_csv=C00C97_2020_csv %>% 
+  mutate(Oncology_observed=Malignant_neoplasms,
+         Oncology_fitted=round(fit_C00C97_cc_c,0),
+         Oncology_PImin=round(`2.5%`,0),
+         Oncology_PImax=round(`97.5%`,0)) %>% 
+  group_by(WOY,Oncology_observed,Oncology_fitted,Oncology_PImin,Oncology_PImax) %>% 
+  summarize(Oncology_diff=round(Oncology_observed-Oncology_fitted,0),
+            Oncology_diff_PImin=round(Oncology_observed-Oncology_PImax,0),
+            Oncology_diff_PImax=round(Oncology_observed-Oncology_PImin,0),
+            Oncology_excess=ifelse(round(Oncology_observed-Oncology_fitted,0)>0,
+                                   round(Oncology_observed-Oncology_fitted,0),0),
+            Oncology_excess_max=ifelse(round(Oncology_observed-Oncology_PImin,0)>0,
+                                       round(Oncology_observed-Oncology_PImin,0),0),
+            Oncology_excess_min=ifelse(round(Oncology_observed-Oncology_PImax,0)>0,
+                                       round(Oncology_observed-Oncology_PImax,0),0)) %>% 
+ungroup()
+
+write_excel_csv2(C00C97_2020_csv,"./outputs/table_Oncology.csv") # write resulting table to file
+```
+
+
+### Figures
+
+Observed and model predicted values in 2020
+
+```{r,fig.width=9,fig.height=3}
+
+attels_C00C97_weeks <- ggplot(C00C97_2020,aes(x=WOY,y=Malignant_neoplasms))+
+  geom_vline(xintercept=13,lty=3)+
+  theme_classic()+
+  geom_point()+
+  geom_ribbon(data=C00C97_2020,aes(x=WOY,ymin=`2.5%`,ymax=`97.5%`),alpha=.3)+
+  geom_ribbon(data=C00C97_2020,aes(x=WOY,ymin=min_C00C97_cc_c,ymax=max_C00C97_cc_c),alpha=.5)+
+  geom_line(data=C00C97_2020,aes(x=WOY,y=fit_C00C97_cc_c))+
+  xlab("Week of the year 2020")+
+  ylab("Count")+
+  ggtitle("Oncology")
+attels_C00C97_weeks
+```
+
+
+# E10_E14 - diabetes mellitus
+
+
+Fitting models
+
+```{r}
+E10E14_tp_c=gam(Diabetes_mellitus ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+E10E14_tp_fx=gam(Diabetes_mellitus ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+E10E14_cr_c=gam(Diabetes_mellitus ~ fgads + s(WOY,k=51,bs="cr")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+E10E14_cr_fx=gam(Diabetes_mellitus ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+E10E14_cc_c=gam(Diabetes_mellitus ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+E10E14_cc_fx=gam(Diabetes_mellitus ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+```
+
+
+Comparing fitted models. The best model is E10E14_cc_c - cyclic cubic splines with non-fixed effect of the week
+
+```{r}
+AICc(E10E14_tp_c,E10E14_tp_fx,E10E14_cr_c,E10E14_cr_fx,E10E14_cc_c,E10E14_cc_fx)
+```
+
+Model summary
+
+```{r}
+summary(E10E14_cc_c)
+```
+
+Relative risks for years
+
+```{r}
+apk_E10E14_cc_c=summary(E10E14_cc_c)
+RR_E10E14=round(exp(apk_E10E14_cc_c$p.coeff),3)
+RRmin_E10E14=round(exp(apk_E10E14_cc_c$p.coeff-1.96*apk_E10E14_cc_c$se[1:6]),3)
+RRmax_E10E14=round(exp(apk_E10E14_cc_c$p.coeff+1.96*apk_E10E14_cc_c$se[1:6]),3)
+rbind(RR_E10E14,RRmin_E10E14,RRmax_E10E14)
+```
+
+### Confidence intervals
+
+Prediction of the numbers of cases with 95% confidence intervals.
+
+```{r,fig.width=9,fig.height=4.5}
+pred_E10E14_cc_c=as.data.frame(predict(E10E14_cc_c,newdata = dati,se=TRUE,type="response"))
+pred_E10E14_cc_c$min_E10E14_cc_c=pred_E10E14_cc_c$fit-1.96*pred_E10E14_cc_c$se.fit
+pred_E10E14_cc_c$max_E10E14_cc_c=pred_E10E14_cc_c$fit+1.96*pred_E10E14_cc_c$se.fit
+colnames(pred_E10E14_cc_c)[1]="fit_E10E14_cc_c"
+pred_E10E14_cc_c=pred_E10E14_cc_c[,c(1,3,4)]
+
+E10E14ie=cbind(dati,pred_E10E14_cc_c)
+```
+
+
+### Prediction intervals
+
+Prediction intervals cannot be obtained with function predict as in lm. They have to be simulated from the posterior.
+
+```{r prediction E10E14_cc_c}
+# extract the parameter estimates and their covariance matrix
+beta=coef(E10E14_cc_c)
+V=vcov(E10E14_cc_c)
+
+# Simulate number of parameter vectors by Cholesky factorisation of the covariance matrix
+num_beta_vecs <- 10000
+Cv <- chol(V)
+set.seed(1)
+nus <- rnorm(num_beta_vecs * length(beta))
+beta_sims <- beta + t(Cv) %*% matrix(nus, nrow = length(beta), ncol = num_beta_vecs)
+
+# use data for predictions 
+sim_dat2=dati
+
+# calculate linear predictors
+covar_sim <- predict(E10E14_cc_c, newdata = sim_dat2, type = "lpmatrix")
+linpred_sim <- covar_sim %*% beta_sims
+
+# inverse link function
+exp_val_sim <- exp(linpred_sim)
+
+# matrix for predictions
+exp_val_sim2 <- matrix(NA,nrow=nrow(exp_val_sim),ncol=ncol(exp_val_sim))
+
+# as offset was used, need to account for population size
+for (i in 1:ncol(exp_val_sim)){
+  for (j in 1:nrow(exp_val_sim)){
+    exp_val_sim2[j,i]=exp_val_sim[j,i]*dati$pop[j]
+  }
+}
+
+# posterior draws from Poisson family
+y_sim <- matrix(rpois(n = prod(dim(exp_val_sim2)), 
+                      lambda = exp_val_sim2), 
+                nrow = nrow(exp_val_sim2), 
+                ncol = ncol(exp_val_sim2))
+
+# reduction to prediction interval
+pred_int_sim <- apply(y_sim, 1, quantile, prob = c(.025, 0.975))
+
+# transpose matrix
+predint_E10E14_cc_c=t(pred_int_sim)
+
+# combine with data and confidence intervals
+kopejais_E10E14_cc_c=cbind(dati,pred_E10E14_cc_c,predint_E10E14_cc_c)
+```
+
+### Results
+
+Preparation of table with observed, model predicted, difference and excess values
+
+```{r}
+
+# Extract values from 2020
+E10E14_2020=kopejais_E10E14_cc_c %>% 
+  filter(fgads==2020)
+
+# pick necessary columns
+E10E14_2020_csv=E10E14_2020[,c("gads","WOY","Diabetes_mellitus","fit_E10E14_cc_c","2.5%","97.5%")]
+
+E10E14_2020_csv=E10E14_2020_csv %>% 
+  mutate(Diabetes_observed=Diabetes_mellitus,
+         Diabetes_fitted=round(fit_E10E14_cc_c,0),
+         Diabetes_PImin=round(`2.5%`,0),
+         Diabetes_PImax=round(`97.5%`,0)) %>% 
+  group_by(WOY,Diabetes_observed,Diabetes_fitted,Diabetes_PImin,Diabetes_PImax) %>% 
+  summarize(Diabetes_diff=round(Diabetes_mellitus-Diabetes_fitted,0),
+            Diabetes_diff_PImin=round(Diabetes_mellitus-Diabetes_PImax,0),
+            Diabetes_diff_PImax=round(Diabetes_mellitus-Diabetes_PImin,0),
+            Diabetes_excess=ifelse(round(Diabetes_mellitus-Diabetes_fitted,0)>0,
+                                   round(Diabetes_mellitus-Diabetes_fitted,0),0),
+            Diabetes_excess_max=ifelse(round(Diabetes_mellitus-Diabetes_PImin,0)>0,
+                                       round(Diabetes_mellitus-Diabetes_PImin,0),0),
+            Diabetes_excess_min=ifelse(round(Diabetes_mellitus-Diabetes_PImax,0)>0,
+                                       round(Diabetes_mellitus-Diabetes_PImax,0),0)) %>% 
+ungroup()
+
+write_excel_csv2(E10E14_2020_csv,"./outputs/table_Diabetes.csv") # write resulting table to file
+```
+
+### Figures
+
+Observed and model predicted values in 2020
+
+```{r,fig.width=9,fig.height=3}
+
+attels_E10E14_weeks <- ggplot(E10E14_2020,aes(x=WOY,y=Diabetes_mellitus))+
+  geom_vline(xintercept=13,lty=3)+
+  theme_classic()+
+  geom_point()+
+  geom_ribbon(data=E10E14_2020,aes(x=WOY,ymin=`2.5%`,ymax=`97.5%`),alpha=.3)+
+  geom_ribbon(data=E10E14_2020,aes(x=WOY,ymin=min_E10E14_cc_c,ymax=max_E10E14_cc_c),alpha=.5)+
+  geom_line(data=E10E14_2020,aes(x=WOY,y=fit_E10E14_cc_c))+
+  xlab("Week of the year 2020")+
+  ylab("Count")+
+  ggtitle("Diabetes mellitus")
+attels_E10E14_weeks
+```
+
+
+# J42_J47 - chronic lower respiratory diseases
+
+Fitting models
+
+```{r}
+J42J47_tp_c=gam(CLRd ~ fgads + s(WOY,k=52,bs="tp")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+J42J47_tp_fx=gam(CLRd ~ fgads + s(WOY,k=52,fx=TRUE,bs="tp")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+J42J47_cr_c=gam(CLRd ~ fgads + s(WOY,k=51,bs="cr")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+J42J47_cr_fx=gam(CLRd ~ fgads + s(WOY,k=52,fx=TRUE,bs="cr")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+J42J47_cc_c=gam(CLRd ~ fgads + s(WOY,k=52,bs="cc")+offset(log(pop)),
+               data=macibam,family=poisson(link="log"),method="REML")
+J42J47_cc_fx=gam(CLRd ~ fgads + s(WOY,k=52,fx=TRUE,bs="cc")+offset(log(pop)),
+                data=macibam,family=poisson(link="log"),method="REML")
+```
+
+Comparing fitted models. The best model is J42J47_tp_c - thin plate splines with non-fixed effect of the week
+
+```{r}
+AICc(J42J47_tp_c,J42J47_tp_fx,J42J47_cr_c,J42J47_cr_fx,J42J47_cc_c,J42J47_cc_fx)
+```
+
+Model summary
+
+```{r}
+summary(J42J47_tp_c)
+```
+
+Relative risks for years
+
+```{r}
+apk_J42J47_tp_c=summary(J42J47_tp_c)
+RR_J42J47=round(exp(apk_J42J47_tp_c$p.coeff),3)
+RRmin_J42J47=round(exp(apk_J42J47_tp_c$p.coeff-1.96*apk_J42J47_tp_c$se[1:6]),3)
+RRmax_J42J47=round(exp(apk_J42J47_tp_c$p.coeff+1.96*apk_J42J47_tp_c$se[1:6]),3)
+rbind(RR_J42J47,RRmin_J42J47,RRmax_J42J47)
+```
+
+### Confidence intervals
+
+Prediction of the numbers of cases with 95% confidence intervals.
+
+```{r,fig.width=9,fig.height=4.5}
+pred_J42J47_tp_c=as.data.frame(predict(J42J47_tp_c,newdata = dati,se=TRUE,type="response"))
+pred_J42J47_tp_c$min_J42J47_tp_c=pred_J42J47_tp_c$fit-1.96*pred_J42J47_tp_c$se.fit
+pred_J42J47_tp_c$max_J42J47_tp_c=pred_J42J47_tp_c$fit+1.96*pred_J42J47_tp_c$se.fit
+colnames(pred_J42J47_tp_c)[1]="fit_J42J47_tp_c"
+pred_J42J47_tp_c=pred_J42J47_tp_c[,c(1,3,4)]
+
+J42J47ie=cbind(dati,pred_J42J47_tp_c)
+```
+
+
+### Prediction intervals
+
+Prediction intervals cannot be obtained with function predict as in lm. They have to be simulated from the posterior.
+
+```{r prediction J42J47_tp_c}
+# extract the parameter estimates and their covariance matrix
+beta=coef(J42J47_tp_c)
+V=vcov(J42J47_tp_c)
+
+# Simulate number of parameter vectors by Cholesky factorisation of the covariance matrix
+num_beta_vecs <- 10000
+Cv <- chol(V)
+set.seed(1)
+nus <- rnorm(num_beta_vecs * length(beta))
+beta_sims <- beta + t(Cv) %*% matrix(nus, nrow = length(beta), ncol = num_beta_vecs)
+
+# use data for predictions 
+sim_dat2=dati
+
+# calculate linear predictors
+covar_sim <- predict(J42J47_tp_c, newdata = sim_dat2, type = "lpmatrix")
+linpred_sim <- covar_sim %*% beta_sims
+
+
+# inverse link function
+exp_val_sim <- exp(linpred_sim)
+
+# matrix for predictions
+exp_val_sim2 <- matrix(NA,nrow=nrow(exp_val_sim),ncol=ncol(exp_val_sim))
+
+# as offset was used, need to account for population size
+for (i in 1:ncol(exp_val_sim)){
+  for (j in 1:nrow(exp_val_sim)){
+    exp_val_sim2[j,i]=exp_val_sim[j,i]*dati$pop[j]
+  }
+}
+
+# posterior draws from Poisson family
+y_sim <- matrix(rpois(n = prod(dim(exp_val_sim2)), 
+                      lambda = exp_val_sim2), 
+                nrow = nrow(exp_val_sim2), 
+                ncol = ncol(exp_val_sim2))
+
+# reduction to prediction interval
+pred_int_sim <- apply(y_sim, 1, quantile, prob = c(.025, 0.975))
+
+# transpose matrix
+predint_J42J47_tp_c=t(pred_int_sim)
+
+
+# combine with data and confidence intervals
+kopejais_J42J47_tp_c=cbind(dati,pred_J42J47_tp_c,predint_J42J47_tp_c)
+```
+
+### Results
+
+Preparation of table with observed, model predicted, difference and excess values
+
+```{r}
+# Extract values from 2020
+J42J47_2020=kopejais_J42J47_tp_c %>% 
+  filter(fgads==2020)
+
+# pick necessary columns
+J42J47_2020_csv=J42J47_2020[,c("gads","WOY","CLRd","fit_J42J47_tp_c","2.5%","97.5%")]
+
+J42J47_2020_csv=J42J47_2020_csv %>% 
+  mutate(CLRd_observed=CLRd,
+         CLRd_fitted=round(fit_J42J47_tp_c,0),
+         CLRd_PImin=round(`2.5%`,0),
+         CLRd_PImax=round(`97.5%`,0)) %>% 
+  group_by(WOY,CLRd_observed,CLRd_fitted,CLRd_PImin,CLRd_PImax) %>% 
+  summarize(CLRd_diff=round(CLRd_observed-CLRd_fitted,0),
+            CLRd_diff_PImin=round(CLRd_observed-CLRd_PImax,0),
+            CLRd_diff_PImax=round(CLRd_observed-CLRd_PImin,0),
+            CLRd_excess=ifelse(round(CLRd_observed-CLRd_fitted,0)>0,
+                                   round(CLRd_observed-CLRd_fitted,0),0),
+            CLRd_excess_max=ifelse(round(CLRd_observed-CLRd_PImin,0)>0,
+                                       round(CLRd_observed-CLRd_PImin,0),0),
+            CLRd_excess_min=ifelse(round(CLRd_observed-CLRd_PImax,0)>0,
+                                       round(CLRd_observed-CLRd_PImax,0),0)) %>% 
+ungroup()
+
+write_excel_csv2(J42J47_2020_csv,"./outputs/table_CLRd.csv") # write resulting table to file
+```
+
+### Figures
+
+Observed and model predicted values in 2020
+
+```{r,fig.width=9,fig.height=3}
+
+attels_J42J47_weeks <- ggplot(J42J47_2020,aes(x=WOY,y=CLRd))+
+  geom_vline(xintercept=13,lty=3)+
+  theme_classic()+
+  geom_point()+
+  geom_ribbon(data=J42J47_2020,aes(x=WOY,ymin=`2.5%`,ymax=`97.5%`),alpha=.3)+
+  geom_ribbon(data=J42J47_2020,aes(x=WOY,ymin=min_J42J47_tp_c,ymax=max_J42J47_tp_c),alpha=.5)+
+  geom_line(data=J42J47_2020,aes(x=WOY,y=fit_J42J47_tp_c))+
+  xlab("Week of the year 2020")+
+  ylab("Count")+
+  ggtitle("Chronic lower respiratory diseases")
+attels_J42J47_weeks
+```
+
+
+# Supplementary table
+
+```{r}
+bt=merge(total_2020_csv,I00I99_2020_csv,by=c("WOY"))
+bt=merge(bt,C00C97_2020_csv,by=c("WOY"))
+bt=merge(bt,E10E14_2020_csv,by=c("WOY"))
+beigu_tabula=merge(bt,J42J47_2020_csv,by=c("WOY"))
+write_excel_csv2(beigu_tabula,"./outputs/tabula_apvienots.csv")
+```
+
+
