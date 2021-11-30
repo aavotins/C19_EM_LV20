@@ -20,3 +20,6 @@ Girts Briģis (https://orcid.org/0000-0003-3296-4173).
 Corresponding author: Inese Gobiņa, inese.gobina@rsu.lv
 
 The manuscript is currently submitted for a review.
+
+
+*The dataset used and analysed for the current study is available from the Centre of Disease Prevention and Control (CDPC) of Latvia, and restrictions apply to the availability of these data, which were used under licence for the current study and so are not publicly available. The datasets of aggregated data used during the current study are available from the corresponding author upon reasonable request after receiving permission from the CDPC Latvia.*
