@@ -1,7 +1,7 @@
 # C19_EM_LV20
 Covid-19 excess mortality in Latvia 2020
 
-This is a part of the analysis section related to the timing and the amount of excess deaths due to the Covid-19 (directly and indirectly) in Latvia 2020. Manuscript this is related to is **Excess mortality associated with the COVID-19 pandemic in Latvia: a population-level analysis of all-cause and noncommunicable disease deaths in 2020** by 
+This is a part of the analysis section related to the timing and the amount of excess deaths due to the Covid-19 (directly and indirectly) in Latvia 2020. Manuscript this is related to is **Excess mortality associated with the COVID-19 pandemic in Latvia: a population-level analysis of all-cause and noncommunicable disease deaths in 2020** by:
 
 Inese Gobiņa (https://orcid.org/0000-0003-4546-491X), 
 
