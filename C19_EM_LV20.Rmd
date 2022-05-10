@@ -402,7 +402,7 @@ kopejais_total_tp_c=cbind(dati,pred_total_tp_c,predint_total_tp_c)
 
 ### Results
 
-Preparation of table with observed, model predicted, difference and excess values
+Preparation of table with observed, model predicted and their difference values
 
 ```{r}
 # Extract values from 2020
@@ -421,13 +421,7 @@ total_2020_csv=total_2020_csv %>%
   group_by(WOY,pop,Covid_caused,Covid_attributed,Covid_related,AllCause_observed,AllCause_fitted,AllCause_PImin,AllCause_PImax) %>% 
   summarize(AllCause_diff=round(AllCause_observed-fit_total_tp_c,0),
             AllCause_diff_min=round(AllCause_observed-AllCause_PImax,0),
-            AllCause_diff_max=round(AllCause_observed-AllCause_PImin,0),
-            AllCause_excess=ifelse(round(AllCause_observed-fit_total_tp_c,0)>0,
-                                   round(AllCause_observed-fit_total_tp_c,0),0),
-            AllCause_excess_max=ifelse(round(AllCause_observed-AllCause_PImin,0)>0,
-                                       round(AllCause_observed-AllCause_PImin,0),0),
-            AllCause_excess_min=ifelse(round(AllCause_observed-AllCause_PImax,0)>0,
-                                       round(AllCause_observed-AllCause_PImax,0),0)) %>%
+            AllCause_diff_max=round(AllCause_observed-AllCause_PImin,0)) %>%
   ungroup()
 
 write_excel_csv2(total_2020_csv,"./outputs/table_AllCause.csv") # write resulting table to file
@@ -577,7 +571,7 @@ kopejais_I00I99_tp_c=cbind(dati,pred_I00I99_tp_c,predint_I00I99_tp_c)
 
 ### Results
 
-Preparation of table with observed, model predicted, difference and excess values
+Preparation of table with observed, model predicted and their difference values
 
 ```{r}
 
@@ -598,13 +592,7 @@ I00I99_2020_csv=I00I99_2020_csv %>%
   group_by(WOY,Circulatory_observed,Circulatory_fitted,Circulatory_PImin,Circulatory_PImax) %>% 
   summarize(Circulatory_diff=round(Circulatory_observed-Circulatory_fitted,0),
             Circulatory_diff_PImin=round(Circulatory_observed-Circulatory_PImax,0),
-            Circulatory_diff_PImax=round(Circulatory_observed-Circulatory_PImin,0),
-            Circulatory_excess=ifelse(round(Circulatory_observed-Circulatory_fitted,0)>0,
-                                      round(Circulatory_observed-Circulatory_fitted,0),0),
-            Circulatory_excess_PImin=ifelse(round(Circulatory_observed-Circulatory_PImax,0)>0,
-                                            round(Circulatory_observed-Circulatory_PImax,0),0),
-            Circulatory_excess_PImax=ifelse(round(Circulatory_observed-Circulatory_PImin,0)>0,
-                                            round(Circulatory_observed-Circulatory_PImin,0),0)) %>% 
+            Circulatory_diff_PImax=round(Circulatory_observed-Circulatory_PImin,0)) %>% 
 ungroup()
 
 write_excel_csv2(I00I99_2020_csv,"./outputs/table_Circulatory.csv") # write resulting table to file
@@ -750,7 +738,7 @@ kopejais_C00C97_cc_c=cbind(dati,pred_C00C97_cc_c,predint_C00C97_cc_c)
 
 ### Results
 
-Preparation of table with observed, model predicted, difference and excess values
+Preparation of table with observed, model predicted and their difference values
 
 ```{r}
 # Extract values from 2020
@@ -769,13 +757,7 @@ C00C97_2020_csv=C00C97_2020_csv %>%
   group_by(WOY,Oncology_observed,Oncology_fitted,Oncology_PImin,Oncology_PImax) %>% 
   summarize(Oncology_diff=round(Oncology_observed-Oncology_fitted,0),
             Oncology_diff_PImin=round(Oncology_observed-Oncology_PImax,0),
-            Oncology_diff_PImax=round(Oncology_observed-Oncology_PImin,0),
-            Oncology_excess=ifelse(round(Oncology_observed-Oncology_fitted,0)>0,
-                                   round(Oncology_observed-Oncology_fitted,0),0),
-            Oncology_excess_max=ifelse(round(Oncology_observed-Oncology_PImin,0)>0,
-                                       round(Oncology_observed-Oncology_PImin,0),0),
-            Oncology_excess_min=ifelse(round(Oncology_observed-Oncology_PImax,0)>0,
-                                       round(Oncology_observed-Oncology_PImax,0),0)) %>% 
+            Oncology_diff_PImax=round(Oncology_observed-Oncology_PImin,0)) %>% 
 ungroup()
 
 write_excel_csv2(C00C97_2020_csv,"./outputs/table_Oncology.csv") # write resulting table to file
@@ -914,7 +896,7 @@ kopejais_E10E14_cc_c=cbind(dati,pred_E10E14_cc_c,predint_E10E14_cc_c)
 
 ### Results
 
-Preparation of table with observed, model predicted, difference and excess values
+Preparation of table with observed, model predicted and their difference values
 
 ```{r}
 
@@ -933,13 +915,7 @@ E10E14_2020_csv=E10E14_2020_csv %>%
   group_by(WOY,Diabetes_observed,Diabetes_fitted,Diabetes_PImin,Diabetes_PImax) %>% 
   summarize(Diabetes_diff=round(Diabetes_mellitus-Diabetes_fitted,0),
             Diabetes_diff_PImin=round(Diabetes_mellitus-Diabetes_PImax,0),
-            Diabetes_diff_PImax=round(Diabetes_mellitus-Diabetes_PImin,0),
-            Diabetes_excess=ifelse(round(Diabetes_mellitus-Diabetes_fitted,0)>0,
-                                   round(Diabetes_mellitus-Diabetes_fitted,0),0),
-            Diabetes_excess_max=ifelse(round(Diabetes_mellitus-Diabetes_PImin,0)>0,
-                                       round(Diabetes_mellitus-Diabetes_PImin,0),0),
-            Diabetes_excess_min=ifelse(round(Diabetes_mellitus-Diabetes_PImax,0)>0,
-                                       round(Diabetes_mellitus-Diabetes_PImax,0),0)) %>% 
+            Diabetes_diff_PImax=round(Diabetes_mellitus-Diabetes_PImin,0)) %>% 
 ungroup()
 
 write_excel_csv2(E10E14_2020_csv,"./outputs/table_Diabetes.csv") # write resulting table to file
@@ -1077,7 +1053,7 @@ kopejais_J42J47_tp_c=cbind(dati,pred_J42J47_tp_c,predint_J42J47_tp_c)
 
 ### Results
 
-Preparation of table with observed, model predicted, difference and excess values
+Preparation of table with observed, model predicted and their difference values
 
 ```{r}
 # Extract values from 2020
@@ -1095,13 +1071,7 @@ J42J47_2020_csv=J42J47_2020_csv %>%
   group_by(WOY,CLRd_observed,CLRd_fitted,CLRd_PImin,CLRd_PImax) %>% 
   summarize(CLRd_diff=round(CLRd_observed-CLRd_fitted,0),
             CLRd_diff_PImin=round(CLRd_observed-CLRd_PImax,0),
-            CLRd_diff_PImax=round(CLRd_observed-CLRd_PImin,0),
-            CLRd_excess=ifelse(round(CLRd_observed-CLRd_fitted,0)>0,
-                                   round(CLRd_observed-CLRd_fitted,0),0),
-            CLRd_excess_max=ifelse(round(CLRd_observed-CLRd_PImin,0)>0,
-                                       round(CLRd_observed-CLRd_PImin,0),0),
-            CLRd_excess_min=ifelse(round(CLRd_observed-CLRd_PImax,0)>0,
-                                       round(CLRd_observed-CLRd_PImax,0),0)) %>% 
+            CLRd_diff_PImax=round(CLRd_observed-CLRd_PImin,0)) %>% 
 ungroup()
 
 write_excel_csv2(J42J47_2020_csv,"./outputs/table_CLRd.csv") # write resulting table to file
